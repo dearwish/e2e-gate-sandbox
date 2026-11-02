@@ -1,0 +1,14 @@
+name: ci
+# Dummy second workflow so each head SHA carries more than one GitHub Actions check suite,
+# as in the real repo. Not required by the ruleset.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo ok

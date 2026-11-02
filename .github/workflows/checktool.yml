@@ -1,0 +1,52 @@
+name: checktool
+# Experiment helper: create or patch a `frontend-e2e` check run on any SHA with GITHUB_TOKEN
+# (so it is attributed to app 15368, like the claim job's).
+on:
+  workflow_dispatch:
+    inputs:
+      op:
+        description: create | patch
+        required: true
+      sha:
+        description: head SHA (create)
+        required: false
+      id:
+        description: check run id (patch)
+        required: false
+      status:
+        description: in_progress | completed
+        required: true
+      conclusion:
+        description: success | failure | cancelled (when completed)
+        required: false
+      external_id:
+        description: external id (create)
+        required: false
+permissions:
+  checks: write
+jobs:
+  tool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OP: ${{ inputs.op }}
+          SHA: ${{ inputs.sha }}
+          ID: ${{ inputs.id }}
+          STATUS: ${{ inputs.status }}
+          CONCLUSION: ${{ inputs.conclusion }}
+          EXT: ${{ inputs.external_id }}
+        run: |
+          set -euo pipefail
+          if [ "$OP" = create ]; then
+            args=(-f name=frontend-e2e -f head_sha="$SHA" -f status="$STATUS" -f external_id="$EXT"
+                  -f 'output[title]=checktool claim' -f "output[summary]=created by checktool run $GITHUB_RUN_ID")
+            if [ "$STATUS" = completed ]; then args+=(-f conclusion="$CONCLUSION"); fi
+            gh api -X POST "repos/$REPO/check-runs" "${args[@]}" --jq '"created \(.id) \(.status)/\(.conclusion) suite=\(.check_suite.id)"'
+          else
+            args=(-f status="$STATUS" -f 'output[title]=checktool patch' -f "output[summary]=patched by checktool run $GITHUB_RUN_ID")
+            if [ "$STATUS" = completed ]; then args+=(-f conclusion="$CONCLUSION"); fi
+            gh api -X PATCH "repos/$REPO/check-runs/$ID" "${args[@]}" --jq '"patched \(.id) \(.status)/\(.conclusion) suite=\(.check_suite.id)"'
+          fi
