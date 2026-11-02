@@ -39,9 +39,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SLEEP: ${{ vars.SUITE_SLEEP || '420' }}
           FAIL: ${{ vars.SUITE_FAIL || 'false' }}
         run: |
+          # per-branch fail switch: a .sandbox-fail file at the head SHA
+          if gh api "repos/$REPO/contents/.sandbox-fail?ref=$HEAD_SHA" --jq .name >/dev/null 2>&1; then FAIL=true; fi
           echo "sleeping $SLEEP s, fail=$FAIL"
           sleep "$SLEEP"
           if [ "$FAIL" = true ]; then echo "::error::suite failing on purpose"; exit 1; fi
