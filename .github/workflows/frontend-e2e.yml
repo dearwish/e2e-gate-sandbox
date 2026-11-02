@@ -1,0 +1,65 @@
+name: frontend e2e
+# CONTROL variant: mirrors leo-monorepo's frontend-e2e.yml shape (plan -> suite -> always() gate),
+# with a sleep for a suite. The fail switch is the repo variable SUITE_FAIL.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: frontend-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      flows: ${{ steps.label.outputs.requested }}
+    steps:
+      - id: label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          requested=$(gh api "repos/$REPO/pulls/$PR" --jq 'any(.labels[]; .name == "run-tests")') || requested=true
+          echo "run-tests label: $requested"
+          echo "requested=$requested" >> "$GITHUB_OUTPUT"
+
+  test-main-flow:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.outputs.flows == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - env:
+          SLEEP: ${{ vars.SUITE_SLEEP || '420' }}
+          FAIL: ${{ vars.SUITE_FAIL || 'false' }}
+        run: |
+          echo "sleeping $SLEEP s, fail=$FAIL"
+          sleep "$SLEEP"
+          if [ "$FAIL" = true ]; then echo "::error::suite failing on purpose"; exit 1; fi
+
+  frontend-e2e:
+    needs: [plan, test-main-flow]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: gate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS='=' read -r job result; do
+            echo "$job=$result"
+            case "$result" in success | skipped) ;; *) echo "::error::$job did not succeed ($result)"; failed=1 ;; esac
+          done < <(jq -r 'to_entries[] | "\(.key)=\(.value.result)"' <<< "$NEEDS")
+          exit "$failed"
