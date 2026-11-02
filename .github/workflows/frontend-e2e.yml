@@ -1,6 +1,6 @@
 name: frontend e2e
-# CONTROL variant: mirrors leo-monorepo's frontend-e2e.yml shape (plan -> suite -> always() gate),
-# with a sleep for a suite. The fail switch is the repo variable SUITE_FAIL.
+# CLAIM variant: the control variant plus the claim job and the gate's PATCH step, as in
+# frontend-e2e.fix.patch (label read inlined instead of the read-pr-label composite action).
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -13,6 +13,68 @@ permissions:
   contents: read
 
 jobs:
+  claim:
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      check_run_id: ${{ steps.create.outputs.id }}
+    steps:
+      - id: label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          requested=$(gh api "repos/$REPO/pulls/$PR" --jq 'any(.labels[]; .name == "run-tests")') || requested=true
+          echo "run-tests label: $requested"
+          echo "requested=$requested" >> "$GITHUB_OUTPUT"
+
+      - name: Retire orphaned claims
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=frontend-e2e&filter=all&per_page=100" \
+            --jq '.check_runs[] | select(.status != "completed" and ((.external_id // "") | startswith("frontend-e2e-claim:"))) | .id' |
+            while read -r id; do
+              gh api -X PATCH "repos/$REPO/check-runs/$id" \
+                -f status=completed \
+                -f conclusion=cancelled \
+                -f 'output[title]=orphaned claim retired' \
+                -f "output[summary]=Its run ended without a verdict; retired by run $GITHUB_RUN_ID." \
+                --jq '"retired orphaned claim \(.id): \(.status)/\(.conclusion)"'
+            done
+
+      - id: create
+        if: steps.label.outputs.requested == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          id=$(gh api -X POST "repos/$REPO/check-runs" \
+            -f name=frontend-e2e \
+            -f head_sha="$HEAD_SHA" \
+            -f status=in_progress \
+            -f external_id="frontend-e2e-claim:$GITHUB_RUN_ID" \
+            -f details_url="$DETAILS_URL" \
+            -f 'output[title]=run-tests suites running' \
+            -f "output[summary]=Claimed by run $GITHUB_RUN_ID; the frontend-e2e gate job completes it." \
+            --jq .id)
+          echo "claimed check run $id on $HEAD_SHA"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   plan:
     permissions:
       contents: read
@@ -39,16 +101,24 @@ jobs:
     timeout-minutes: 20
     steps:
       - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SLEEP: ${{ vars.SUITE_SLEEP || '420' }}
           FAIL: ${{ vars.SUITE_FAIL || 'false' }}
         run: |
+          # per-branch fail switch: a .sandbox-fail file at the head SHA
+          if gh api "repos/$REPO/contents/.sandbox-fail?ref=$HEAD_SHA" --jq .name >/dev/null 2>&1; then FAIL=true; fi
           echo "sleeping $SLEEP s, fail=$FAIL"
           sleep "$SLEEP"
           if [ "$FAIL" = true ]; then echo "::error::suite failing on purpose"; exit 1; fi
 
   frontend-e2e:
-    needs: [plan, test-main-flow]
+    needs: [claim, plan, test-main-flow]
     if: always()
+    permissions:
+      contents: read
+      checks: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -63,3 +133,20 @@ jobs:
             case "$result" in success | skipped) ;; *) echo "::error::$job did not succeed ($result)"; failed=1 ;; esac
           done < <(jq -r 'to_entries[] | "\(.key)=\(.value.result)"' <<< "$NEEDS")
           exit "$failed"
+
+      - name: Complete the claimed check run
+        if: always() && needs.claim.outputs.check_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHECK_RUN_ID: ${{ needs.claim.outputs.check_run_id }}
+          OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = success ]; then conclusion=success; else conclusion=failure; fi
+          gh api -X PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" \
+            -f status=completed \
+            -f conclusion="$conclusion" \
+            -f "output[title]=frontend-e2e gate: $conclusion" \
+            -f "output[summary]=Completed by the gate of run $GITHUB_RUN_ID (suite-gate outcome: $OUTCOME)." \
+            --jq '"check run \(.id): \(.status)/\(.conclusion)"'
